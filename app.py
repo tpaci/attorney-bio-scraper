@@ -1,5 +1,5 @@
 # --- TSEG Branded Attorney Bio Scraper (Streamlit) ---
-import time, re
+import time, re, concurrent.futures, urllib.parse
 import pandas as pd
 import requests
 import streamlit as st
@@ -29,37 +29,18 @@ st.markdown(
         border: 1px solid {ACCENT}55;
         margin-bottom: 20px;
       }}
-      .tseg-header h1 {{
-        font-weight: 800; 
-        font-size: 1.8rem; 
-        margin: 0;
-      }}
-      .tseg-sub {{
-        font-size: 0.95rem;
-        color: rgba(255,255,255,0.75);
-        margin-top: 6px;
-      }}
-      .tseg-logo {{
-        display:block;
-        margin-left:auto; margin-right:auto;
-        margin-bottom:14px;
-      }}
+      .tseg-header h1 {{ font-weight: 800; font-size: 1.8rem; margin: 0; }}
+      .tseg-sub {{ font-size: 0.95rem; color: rgba(255,255,255,0.75); margin-top: 6px; }}
+      .tseg-logo {{ display:block; margin-left:auto; margin-right:auto; margin-bottom:14px; }}
       .stButton>button {{
-        border-radius: 12px; 
-        border:1px solid {ACCENT}55;
-        padding: 10px 14px; 
-        font-weight: 600;
-        color: white;
-        background-color: {ACCENT}33;
+        border-radius: 12px; border:1px solid {ACCENT}55; padding: 10px 14px; font-weight: 600;
+        color: white; background-color: {ACCENT}33;
       }}
-      .stButton>button:hover {{
-        border-color: {ACCENT};
-        background-color: {ACCENT}55;
-      }}
-      .stDataFrame div[data-testid="stDataFrame"] {{
-        border-radius: 12px; 
-        overflow:hidden;
-      }}
+      .stButton>button:hover {{ border-color: {ACCENT}; background-color: {ACCENT}55; }}
+      .stDataFrame div[data-testid="stDataFrame"] {{ border-radius: 12px; overflow:hidden; }}
+      .pill {{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid {ACCENT}55; margin-right:6px; }}
+      .ctx {{ color: rgba(255,255,255,0.8); font-size: 0.9rem; }}
+      .ctx b {{ color: {ACCENT}; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -83,10 +64,8 @@ st.markdown(
 # Scraper utilities
 # -----------------------------
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/123.0 Safari/537.36"
-    )
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/123.0 Safari/537.36")
 }
 
 HOBBY_WORDS = [
@@ -97,6 +76,19 @@ HOBBY_WORDS = [
 PET_WORDS = ["dog","dogs","cat","cats","puppy","kitten","golden retriever","pets","animal lover"]
 FAMILY_WORDS = ["husband","wife","spouse","partner","children","kids","daughter","son","mother","father","family","married"]
 COMMUNITY_WORDS = ["volunteer","board member","foundation","nonprofit","mentor","coach","community","pro bono"]
+LANG_WORDS = ["spanish","french","german","italian","mandarin","cantonese","portuguese","arabic","hebrew","hindi","korean","japanese","russian","vietnamese"]
+AWARD_WORDS = ["super lawyers","best lawyers","rising star","top 40 under 40","av preeminent","lawdragon"]
+BAR_WORDS = ["state bar","bar admission","admitted to practice","supreme court","federal court","fifth circuit","ninth circuit"]
+
+ALL_THEMES = [
+    ("Hobbies", HOBBY_WORDS),
+    ("Pets", PET_WORDS),
+    ("Family", FAMILY_WORDS),
+    ("Community", COMMUNITY_WORDS),
+    ("Languages", LANG_WORDS),
+    ("Awards", AWARD_WORDS),
+    ("Bar / Courts", BAR_WORDS),
+]
 
 def fetch_html(url: str, timeout: int = 25) -> str | None:
     try:
@@ -120,12 +112,12 @@ def nearest_block_with_name(soup: BeautifulSoup, name: str):
             node = node.parent
     return None
 
-def extract_keywords(text: str, vocab: list[str]) -> str:
+def extract_keywords(text: str, vocab: list[str]) -> list[str]:
     found = []
     for word in vocab:
         if re.search(rf"\b{re.escape(word)}\b", text, flags=re.IGNORECASE):
             found.append(word)
-    return ", ".join(sorted(set(found))) if found else ""
+    return sorted(set(found))
 
 def extract_schools(text: str) -> tuple[str, str]:
     law = re.findall(r"([A-Z][A-Za-z&.\-,'\s]+(?:School of Law| Law)(?:,?\s*[A-Z][A-Za-z&.\-,'\s]+)*)", text)
@@ -134,28 +126,103 @@ def extract_schools(text: str) -> tuple[str, str]:
     undergrad  = ", ".join(sorted(set([s.strip() for s in ug  if len(s) < 120])))
     return law_school, undergrad
 
+def split_sentences(text: str) -> list[str]:
+    # light sentence splitter
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    return [p.strip() for p in parts if len(p.strip()) > 0 and len(p) < 300]
+
+def context_snippets(text: str, keywords: list[str], max_per_theme: int = 2) -> list[str]:
+    sents = split_sentences(text)
+    found = []
+    for kw in keywords:
+        patt = re.compile(rf"(.{{0,80}}\b{re.escape(kw)}\b.{{0,80}})", re.IGNORECASE)
+        for s in sents:
+            m = patt.search(s)
+            if m:
+                # bold the keyword in context
+                snippet = re.sub(rf"(\b{re.escape(kw)}\b)", r"<b>\\1</b>", m.group(0), flags=re.IGNORECASE)
+                found.append(snippet)
+                break  # one sentence per keyword
+        if len(found) >= max_per_theme:
+            break
+    return found
+
+def absolutize(base_url: str, src: str) -> str:
+    try:
+        return urllib.parse.urljoin(base_url, src)
+    except:
+        return src
+
+def find_links_and_headshot(block: BeautifulSoup, base_url: str) -> tuple[list[tuple[str,str]], str | None]:
+    links = []
+    headshot = None
+
+    # social/email links
+    for a in block.find_all("a", href=True):
+        href = a["href"].strip()
+        lhref = href.lower()
+        label = None
+        if "linkedin.com" in lhref: label = "LinkedIn"
+        elif "twitter.com" in lhref or "x.com" in lhref: label = "X (Twitter)"
+        elif "facebook.com" in lhref: label = "Facebook"
+        elif href.startswith("mailto:"): label = "Email"
+        if label:
+            links.append((label, absolutize(base_url, href)))
+
+    # nearest image as headshot
+    img = block.find("img")
+    if img and img.get("src"):
+        headshot = absolutize(base_url, img["src"])
+    return links, headshot
+
 def scrape_one(url: str, target_name: str, timeout: int = 25) -> dict:
     html = fetch_html(url, timeout=timeout)
     if not html:
-        return {
-            "Name": target_name, "Law School": "", "Undergrad": "", "Hobbies": "",
-            "Pets": "", "Family": "", "Community Involvement": "",
-            "Bio Snippet": "Fetch error", "URL": url
-        }
+        return {"Name": target_name, "URL": url, "Law School": "", "Undergrad": "",
+                "Hobbies": "", "Pets": "", "Family": "", "Community": "",
+                "Languages": "", "Awards": "", "Bar / Courts": "",
+                "Context": "", "Links": "", "Headshot": ""}
+
     soup = BeautifulSoup(html, "lxml")
     block = nearest_block_with_name(soup, target_name)
     text  = (block.get_text(" ", strip=True) if block else soup.get_text(" ", strip=True))
+
     law_school, undergrad = extract_schools(text)
+
+    # keywords + contexts
+    theme_hits = {}
+    theme_ctx = {}
+    for name, vocab in ALL_THEMES:
+        hits = extract_keywords(text, vocab)
+        theme_hits[name] = ", ".join(hits)
+        theme_ctx[name] = context_snippets(text, hits[:3]) if hits else []
+
+    # links & headshot
+    links, headshot = (find_links_and_headshot(block, url) if block else ([], None))
+    links_str = "; ".join([f"{label}: {href}" for (label, href) in links])
+
+    # pack short context (merge across themes)
+    ctx_lines = []
+    for name, _ in ALL_THEMES:
+        for c in theme_ctx.get(name, [])[:1]:
+            ctx_lines.append(f"<span class='pill'>{name}</span> <span class='ctx'>{c}</span>")
+    ctx_html = "<br/>".join(ctx_lines[:6])
+
     return {
         "Name": target_name,
+        "URL": url,
         "Law School": law_school,
         "Undergrad": undergrad,
-        "Hobbies":   extract_keywords(text, HOBBY_WORDS),
-        "Pets":      extract_keywords(text, PET_WORDS),
-        "Family":    extract_keywords(text, FAMILY_WORDS),
-        "Community Involvement": extract_keywords(text, COMMUNITY_WORDS),
-        "Bio Snippet": (text[:300] + "...") if len(text) > 300 else text,
-        "URL": url,
+        "Hobbies": theme_hits["Hobbies"],
+        "Pets": theme_hits["Pets"],
+        "Family": theme_hits["Family"],
+        "Community": theme_hits["Community"],
+        "Languages": theme_hits["Languages"],
+        "Awards": theme_hits["Awards"],
+        "Bar / Courts": theme_hits["Bar / Courts"],
+        "Context": ctx_html,          # HTML snippets
+        "Links": links_str,           # human-readable; also shown as buttons in UI
+        "Headshot": headshot or "",
     }
 
 def normalize_input(df: pd.DataFrame) -> pd.DataFrame:
@@ -172,7 +239,8 @@ def normalize_input(df: pd.DataFrame) -> pd.DataFrame:
 with st.sidebar:
     st.header("⚙️ Settings")
     timeout = st.slider("Request timeout (seconds)", 5, 60, 25)
-    st.caption("If a site is slow to respond, increase the timeout.")
+    max_workers = st.slider("Parallel requests", 1, 8, 4)
+    st.caption("If sites are slow or blocky, lower parallelism and increase timeout.")
 
 # -----------------------------
 # Main UI
@@ -193,8 +261,8 @@ with st.expander("📄 See sample CSV"):
         language="csv",
     )
 
-results_container = st.empty()
-progress_container = st.empty()
+results_placeholder = st.empty()
+progress_placeholder = st.empty()
 log_container = st.expander("🪵 Logs (debug)")
 
 df_in = None
@@ -208,27 +276,59 @@ if uploaded:
 
 c1, c2 = st.columns(2)
 
-def run(df: pd.DataFrame):
+def run_parallel(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    prog = progress_container.progress(0, text="Starting...")
     total = len(df)
-    for i, r in df.reset_index(drop=True).iterrows():
+    prog = progress_placeholder.progress(0, text="Starting...")
+    def task(i_row):
+        i, r = i_row
         url  = str(r["URL"]).strip()
         name = str(r["Target Name"]).strip()
         st.session_state["logs"].append(f"Scraping {name} from {url}")
-        rows.append(scrape_one(url, name, timeout=timeout))
-        prog.progress((i + 1) / total, text=f"Scraping {name} ({i+1}/{total})")
-        time.sleep(0.05)
+        out = scrape_one(url, name, timeout=timeout)
+        return i, out
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for idx, out in ex.map(task, df.reset_index(drop=True).iterrows()):
+            rows.append(out)
+            prog.progress(min((idx+1)/total, 1.0), text=f"Scraped {idx+1}/{total}")
+            time.sleep(0.02)
     prog.progress(1.0, text="Done ✅")
     return pd.DataFrame(rows)
 
 if c1.button("▶️ Run Scrape", disabled=df_in is None, use_container_width=True):
     st.session_state["logs"].clear()
-    res = run(df_in)
-    results_container.dataframe(res, use_container_width=True, hide_index=True)
+    res = run_parallel(df_in)
+
+    # Pretty results table with action buttons
+    st.markdown("### 2) Results")
+    for _, row in res.iterrows():
+        with st.container(border=True):
+            top = st.columns([1, 5, 2])
+            with top[0]:
+                if row["Headshot"]:
+                    st.image(row["Headshot"], width=90)
+            with top[1]:
+                st.markdown(f"**{row['Name']}**  \n"
+                            f"{row['Law School'] or ''}  \n"
+                            f"{row['Undergrad'] or ''}")
+                # context lines
+                if row["Context"]:
+                    st.markdown(row["Context"], unsafe_allow_html=True)
+            with top[2]:
+                st.link_button("Open Bio", row["URL"], use_container_width=True)
+                # links
+                if row["Links"]:
+                    # turn into individual buttons
+                    for part in row["Links"].split("; "):
+                        if ": " in part:
+                            label, href = part.split(": ", 1)
+                            st.link_button(label.strip(), href.strip(), use_container_width=True)
+
+    # Download
     st.download_button(
         "⬇️ Download Results (CSV)",
-        res.to_csv(index=False).encode("utf-8"),
+        res.drop(columns=["Context"]).to_csv(index=False).encode("utf-8"),
         "attorney_bio_scrape_results.csv",
         "text/csv",
         use_container_width=True,
@@ -237,8 +337,8 @@ if c1.button("▶️ Run Scrape", disabled=df_in is None, use_container_width=Tr
 
 if c2.button("🧹 Clear Output", use_container_width=True):
     st.session_state["logs"].clear()
-    results_container.empty()
-    progress_container.empty()
+    results_placeholder.empty()
+    progress_placeholder.empty()
 
 with log_container:
     if st.session_state["logs"]:
