@@ -5,9 +5,9 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-# -----------------------------
+# =============================
 # Branding / Theme
-# -----------------------------
+# =============================
 TSEG_LOGO = "https://www.tseg.com/wp-content/uploads/2023/02/tseg-social-thumbnail.png"
 ACCENT = "#9ccb3b"  # TSEG green
 
@@ -17,7 +17,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Custom CSS
 st.markdown(
     f"""
     <style>
@@ -39,14 +38,13 @@ st.markdown(
       .stButton>button:hover {{ border-color: {ACCENT}; background-color: {ACCENT}55; }}
       .stDataFrame div[data-testid="stDataFrame"] {{ border-radius: 12px; overflow:hidden; }}
       .pill {{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid {ACCENT}55; margin-right:6px; }}
-      .ctx {{ color: rgba(255,255,255,0.8); font-size: 0.9rem; }}
+      .ctx {{ color: rgba(255,255,255,0.88); font-size: 0.9rem; }}
       .ctx b {{ color: {ACCENT}; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Header block
 st.markdown(
     f"""
     <div class="tseg-header">
@@ -60,12 +58,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -----------------------------
+# =============================
 # Scraper utilities
-# -----------------------------
+# =============================
 HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/123.0 Safari/537.36")
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+    )
 }
 
 HOBBY_WORDS = [
@@ -91,12 +91,12 @@ ALL_THEMES = [
 ]
 
 def fetch_html(url: str, timeout: int = 25) -> str | None:
+    """Thread-safe: no session_state access here."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.text
-    except Exception as e:
-        st.session_state.setdefault("logs", []).append(f"[WARN] Fetch failed for {url}: {e}")
+    except Exception:
         return None
 
 def nearest_block_with_name(soup: BeautifulSoup, name: str):
@@ -127,9 +127,8 @@ def extract_schools(text: str) -> tuple[str, str]:
     return law_school, undergrad
 
 def split_sentences(text: str) -> list[str]:
-    # light sentence splitter
     parts = re.split(r'(?<=[.!?])\s+', text)
-    return [p.strip() for p in parts if len(p.strip()) > 0 and len(p) < 300]
+    return [p.strip() for p in parts if 0 < len(p.strip()) < 300]
 
 def context_snippets(text: str, keywords: list[str], max_per_theme: int = 2) -> list[str]:
     sents = split_sentences(text)
@@ -139,10 +138,9 @@ def context_snippets(text: str, keywords: list[str], max_per_theme: int = 2) -> 
         for s in sents:
             m = patt.search(s)
             if m:
-                # bold the keyword in context
                 snippet = re.sub(rf"(\b{re.escape(kw)}\b)", r"<b>\\1</b>", m.group(0), flags=re.IGNORECASE)
                 found.append(snippet)
-                break  # one sentence per keyword
+                break
         if len(found) >= max_per_theme:
             break
     return found
@@ -156,8 +154,6 @@ def absolutize(base_url: str, src: str) -> str:
 def find_links_and_headshot(block: BeautifulSoup, base_url: str) -> tuple[list[tuple[str,str]], str | None]:
     links = []
     headshot = None
-
-    # social/email links
     for a in block.find_all("a", href=True):
         href = a["href"].strip()
         lhref = href.lower()
@@ -168,8 +164,6 @@ def find_links_and_headshot(block: BeautifulSoup, base_url: str) -> tuple[list[t
         elif href.startswith("mailto:"): label = "Email"
         if label:
             links.append((label, absolutize(base_url, href)))
-
-    # nearest image as headshot
     img = block.find("img")
     if img and img.get("src"):
         headshot = absolutize(base_url, img["src"])
@@ -189,7 +183,6 @@ def scrape_one(url: str, target_name: str, timeout: int = 25) -> dict:
 
     law_school, undergrad = extract_schools(text)
 
-    # keywords + contexts
     theme_hits = {}
     theme_ctx = {}
     for name, vocab in ALL_THEMES:
@@ -197,11 +190,9 @@ def scrape_one(url: str, target_name: str, timeout: int = 25) -> dict:
         theme_hits[name] = ", ".join(hits)
         theme_ctx[name] = context_snippets(text, hits[:3]) if hits else []
 
-    # links & headshot
     links, headshot = (find_links_and_headshot(block, url) if block else ([], None))
     links_str = "; ".join([f"{label}: {href}" for (label, href) in links])
 
-    # pack short context (merge across themes)
     ctx_lines = []
     for name, _ in ALL_THEMES:
         for c in theme_ctx.get(name, [])[:1]:
@@ -220,8 +211,8 @@ def scrape_one(url: str, target_name: str, timeout: int = 25) -> dict:
         "Languages": theme_hits["Languages"],
         "Awards": theme_hits["Awards"],
         "Bar / Courts": theme_hits["Bar / Courts"],
-        "Context": ctx_html,          # HTML snippets
-        "Links": links_str,           # human-readable; also shown as buttons in UI
+        "Context": ctx_html,
+        "Links": links_str,
         "Headshot": headshot or "",
     }
 
@@ -233,18 +224,18 @@ def normalize_input(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("CSV must contain columns: 'URL' and 'Target Name'")
     return df.rename(columns={url_col: "URL", name_col: "Target Name"})[["URL", "Target Name"]]
 
-# -----------------------------
+# =============================
 # Sidebar
-# -----------------------------
+# =============================
 with st.sidebar:
     st.header("⚙️ Settings")
     timeout = st.slider("Request timeout (seconds)", 5, 60, 25)
     max_workers = st.slider("Parallel requests", 1, 8, 4)
     st.caption("If sites are slow or blocky, lower parallelism and increase timeout.")
 
-# -----------------------------
+# =============================
 # Main UI
-# -----------------------------
+# =============================
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 
@@ -277,22 +268,32 @@ if uploaded:
 c1, c2 = st.columns(2)
 
 def run_parallel(df: pd.DataFrame) -> pd.DataFrame:
+    # MAIN THREAD: ensure logs key exists
+    if "logs" not in st.session_state:
+        st.session_state["logs"] = []
+
     rows = []
     total = len(df)
     prog = progress_placeholder.progress(0, text="Starting...")
+
     def task(i_row):
         i, r = i_row
         url  = str(r["URL"]).strip()
         name = str(r["Target Name"]).strip()
-        st.session_state["logs"].append(f"Scraping {name} from {url}")
         out = scrape_one(url, name, timeout=timeout)
-        return i, out
+        # Build a log message (thread returns it; do NOT touch session_state here)
+        ok = any(out.get(k) for k in ["Law School","Undergrad","Hobbies","Pets","Family","Community","Languages","Awards","Bar / Courts"])
+        logmsg = f"{'Scraped' if ok else '[WARN] Possible fetch/parse issue for'} {name} from {url}"
+        return i, out, logmsg
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for idx, out in ex.map(task, df.reset_index(drop=True).iterrows()):
+        for idx, out, logmsg in ex.map(task, df.reset_index(drop=True).iterrows()):
             rows.append(out)
-            prog.progress(min((idx+1)/total, 1.0), text=f"Scraped {idx+1}/{total}")
+            # MAIN THREAD: update progress & logs safely
+            st.session_state["logs"].append(logmsg)
+            prog.progress(min((idx + 1) / total, 1.0), text=f"Scraped {idx + 1}/{total}")
             time.sleep(0.02)
+
     prog.progress(1.0, text="Done ✅")
     return pd.DataFrame(rows)
 
@@ -300,32 +301,25 @@ if c1.button("▶️ Run Scrape", disabled=df_in is None, use_container_width=Tr
     st.session_state["logs"].clear()
     res = run_parallel(df_in)
 
-    # Pretty results table with action buttons
     st.markdown("### 2) Results")
     for _, row in res.iterrows():
         with st.container(border=True):
-            top = st.columns([1, 5, 2])
-            with top[0]:
+            left, mid, right = st.columns([1, 5, 2])
+            with left:
                 if row["Headshot"]:
                     st.image(row["Headshot"], width=90)
-            with top[1]:
-                st.markdown(f"**{row['Name']}**  \n"
-                            f"{row['Law School'] or ''}  \n"
-                            f"{row['Undergrad'] or ''}")
-                # context lines
+            with mid:
+                st.markdown(f"**{row['Name']}**  \n{row['Law School'] or ''}  \n{row['Undergrad'] or ''}")
                 if row["Context"]:
                     st.markdown(row["Context"], unsafe_allow_html=True)
-            with top[2]:
+            with right:
                 st.link_button("Open Bio", row["URL"], use_container_width=True)
-                # links
                 if row["Links"]:
-                    # turn into individual buttons
                     for part in row["Links"].split("; "):
                         if ": " in part:
                             label, href = part.split(": ", 1)
                             st.link_button(label.strip(), href.strip(), use_container_width=True)
 
-    # Download
     st.download_button(
         "⬇️ Download Results (CSV)",
         res.drop(columns=["Context"]).to_csv(index=False).encode("utf-8"),
