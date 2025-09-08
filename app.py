@@ -169,6 +169,51 @@ def find_links_and_headshot(block: BeautifulSoup, base_url: str) -> tuple[list[t
         headshot = absolutize(base_url, img["src"])
     return links, headshot
 
+# ---------- Talk Track helpers ----------
+def _first_piece(s: str) -> str:
+    return s.split(",")[0].strip() if s else ""
+
+def _join_nonempty(parts, sep=", "):
+    return sep.join([p for p in parts if p])
+
+def build_talk_track(rec: dict) -> str:
+    name = rec.get("Name") or "They"
+    law = _first_piece(rec.get("Law School", ""))
+    ug  = _first_piece(rec.get("Undergrad", ""))
+    awards = _first_piece(rec.get("Awards", ""))
+    comm   = _first_piece(rec.get("Community", ""))
+    langs  = _first_piece(rec.get("Languages", ""))
+    hobbies= _first_piece(rec.get("Hobbies", ""))
+    pets   = _first_piece(rec.get("Pets", ""))
+    bar    = _first_piece(rec.get("Bar / Courts", ""))
+    family = _first_piece(rec.get("Family", ""))
+
+    clauses = []
+    edu_bits = []
+    if law: edu_bits.append(f"studied law at {law}")
+    if ug and not law: edu_bits.append(f"studied at {ug}")
+    if edu_bits: clauses.append(_join_nonempty(edu_bits, " and "))
+
+    pro_bits = []
+    if awards: pro_bits.append(f"recognized by {awards}")
+    if bar:    pro_bits.append(f"admitted ({bar})")
+    if pro_bits: clauses.append(_join_nonempty(pro_bits, ", "))
+
+    color_bits = []
+    if comm:   color_bits.append("active in community work")
+    if langs:  color_bits.append(f"speaks {langs}")
+    if hobbies:color_bits.append(f"enjoys {hobbies}")
+    if pets:   color_bits.append(f"has {('a ' if pets and pets[0] not in 'aeiou' else 'an ')}{pets}")
+    if family: color_bits.append(f"mentions {family}")
+    if color_bits: clauses.append(_join_nonempty(color_bits, ", "))
+
+    if not clauses:
+        return f"{name}—looking forward to connecting at the conference."
+    line = _join_nonempty(clauses, "; ")
+    if len(line) > 220:
+        line = line[:217].rstrip(",; ") + "…"
+    return line
+
 def scrape_one(url: str, target_name: str, timeout: int = 25) -> dict:
     html = fetch_html(url, timeout=timeout)
     if not html:
@@ -281,7 +326,6 @@ def run_parallel(df: pd.DataFrame) -> pd.DataFrame:
         url  = str(r["URL"]).strip()
         name = str(r["Target Name"]).strip()
         out = scrape_one(url, name, timeout=timeout)
-        # Build a log message (thread returns it; do NOT touch session_state here)
         ok = any(out.get(k) for k in ["Law School","Undergrad","Hobbies","Pets","Family","Community","Languages","Awards","Bar / Courts"])
         logmsg = f"{'Scraped' if ok else '[WARN] Possible fetch/parse issue for'} {name} from {url}"
         return i, out, logmsg
@@ -289,8 +333,7 @@ def run_parallel(df: pd.DataFrame) -> pd.DataFrame:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
         for idx, out, logmsg in ex.map(task, df.reset_index(drop=True).iterrows()):
             rows.append(out)
-            # MAIN THREAD: update progress & logs safely
-            st.session_state["logs"].append(logmsg)
+            st.session_state["logs"].append(logmsg)            # main thread only
             prog.progress(min((idx + 1) / total, 1.0), text=f"Scraped {idx + 1}/{total}")
             time.sleep(0.02)
 
@@ -301,6 +344,9 @@ if c1.button("▶️ Run Scrape", disabled=df_in is None, use_container_width=Tr
     st.session_state["logs"].clear()
     res = run_parallel(df_in)
 
+    # Add Talk Track column
+    res["Talk Track"] = res.apply(lambda r: build_talk_track(r.to_dict()), axis=1)
+
     st.markdown("### 2) Results")
     for _, row in res.iterrows():
         with st.container(border=True):
@@ -310,7 +356,9 @@ if c1.button("▶️ Run Scrape", disabled=df_in is None, use_container_width=Tr
                     st.image(row["Headshot"], width=90)
             with mid:
                 st.markdown(f"**{row['Name']}**  \n{row['Law School'] or ''}  \n{row['Undergrad'] or ''}")
-                if row["Context"]:
+                if row.get("Talk Track"):
+                    st.markdown(f"🗣️ *{row['Talk Track']}*")
+                if row.get("Context"):
                     st.markdown(row["Context"], unsafe_allow_html=True)
             with right:
                 st.link_button("Open Bio", row["URL"], use_container_width=True)
@@ -320,6 +368,7 @@ if c1.button("▶️ Run Scrape", disabled=df_in is None, use_container_width=Tr
                             label, href = part.split(": ", 1)
                             st.link_button(label.strip(), href.strip(), use_container_width=True)
 
+    # Download CSV (exclude HTML 'Context', keep Talk Track)
     st.download_button(
         "⬇️ Download Results (CSV)",
         res.drop(columns=["Context"]).to_csv(index=False).encode("utf-8"),
@@ -339,3 +388,4 @@ with log_container:
         st.write("\n".join(st.session_state["logs"]))
     else:
         st.caption("Logs will appear here during the run.")
+
